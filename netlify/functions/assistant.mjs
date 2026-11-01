@@ -57,7 +57,7 @@ export default async (request) => {
   }
 
   try {
-    const endpoint = baseUrl.replace(/\\/$/, "") + "/v1beta/models/gemini-3-flash-preview:generateContent";
+    const endpoint = baseUrl.replace(/\/$/, "") + "/v1beta/models/gemini-3-flash-preview:generateContent";
     const upstream = await fetch(endpoint, {
       method: "POST",
       headers: {
