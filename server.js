@@ -5,6 +5,6 @@ const app=express();
 const root=path.dirname(fileURLToPath(import.meta.url));
 app.use(express.static(path.join(root,"public")));
 app.get("/api/status",(_req,res)=>res.json({ok:true,assistantConfigured:Boolean(process.env.GEMINI_API_KEY)}));
-app.get("*",(req,res)=>res.sendFile(path.join(root,"public","index.html")));
+app.use((req,res)=>res.sendFile(path.join(root,"public","index.html")));
 const port=process.env.PORT||3000;
 app.listen(port,()=>console.log("Mirsad listening on "+port));
