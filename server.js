@@ -8,19 +8,19 @@ app.use(express.json({ limit: "24kb" }));
 app.use(express.static(path.join(root, "public")));
 
 app.get("/api/status", (_req, res) => {
-  res.json({ ok: true, assistantConfigured: Boolean(process.env.GEMINI_API_KEY) });
+  res.json({ ok: true, assistantConfigured: Boolean(process.env.HF_TOKEN) });
 });
 
 const requestCounts = new Map();
 app.post("/api/chat", async (req, res) => {
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(503).json({ error: "المساعد لم يُفعّل بعد. يحتاج إلى إعداد مفتاح Gemini في الخادم." });
+  if (!process.env.HF_TOKEN) {
+    return res.status(503).json({ error: "نجم ينتظر تفعيل اتصال الذكاء الاصطناعي. أضف رمز Hugging Face إلى إعدادات الخادم." });
   }
 
   const ip = req.ip || req.socket.remoteAddress || "unknown";
   const now = Date.now();
   const recent = (requestCounts.get(ip) || []).filter((time) => now - time < 60_000);
-  if (recent.length >= 12) {
+  if (recent.length >= 6) {
     return res.status(429).json({ error: "أرسلت أسئلة كثيرة خلال دقيقة. انتظر قليلًا ثم حاول مجددًا." });
   }
   recent.push(now);
@@ -30,62 +30,66 @@ app.post("/api/chat", async (req, res) => {
   if (!Array.isArray(messages) || messages.length < 1 || messages.length > 12) {
     return res.status(400).json({ error: "صيغة المحادثة غير صحيحة." });
   }
-  const contents = [];
+
+  const conversation = [];
   for (const message of messages) {
-    if (!message || !["user", "model"].includes(message.role) ||
+    if (!message || !["user", "model", "assistant"].includes(message.role) ||
         typeof message.content !== "string" || !message.content.trim() ||
         message.content.length > 2000) {
       return res.status(400).json({ error: "تحقق من نص السؤال ثم أعد المحاولة." });
     }
-    contents.push({ role: message.role, parts: [{ text: message.content }] });
+    conversation.push({
+      role: message.role === "model" ? "assistant" : message.role,
+      content: message.content
+    });
   }
-  if (contents[contents.length - 1].role !== "user") {
+  if (conversation[conversation.length - 1].role !== "user") {
     return res.status(400).json({ error: "أرسل سؤالًا جديدًا للمتابعة." });
   }
 
   try {
-    const upstream = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": process.env.GEMINI_API_KEY
-        },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{
-              text: "أنت نجم، مساعد فلكي تعليمي داخل موقع مِرصد. أجب باللغة العربية الواضحة والودودة، واشرح المفاهيم العلمية بدقة وبأسلوب مناسب للطلاب. ركّز على علم الفلك والفضاء، ويمكنك الإجابة عن الأسئلة العامة بإيجاز ثم إعادة توجيه الحوار إلى الفلك. لا تخترع مواعيد أو بيانات فلكية مباشرة؛ وضّح عندما تحتاج المعلومة إلى مصدر محدث. اجعل الإجابات منظمة ومختصرة، وشجّع الفضول والتفكير العلمي."
-            }]
+    const upstream = await fetch("https://router.huggingface.co/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.HF_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "Qwen/Qwen3-4B-Thinking-2507:fastest",
+        messages: [
+          {
+            role: "system",
+            content: "أنت نجم، مساعد فلكي تعليمي في موقع مِرصد. أجب بالعربية الواضحة، واشرح علم الفلك والفضاء بدقة وبأسلوب مناسب للطلاب. أعط إجابات مفهومة ومنظمة ومختصرة. لا تخترع حقائق أو أرقامًا أو مواعيد للأحداث الفلكية. إذا لم تكن متأكدًا أو كانت المعلومة تحتاج بيانات حديثة، فقل ذلك بوضوح ولا تتظاهر بالمعرفة. فرّق بين الحقائق العلمية الراسخة والتوقعات أو الفرضيات. يمكنك الإجابة عن الأسئلة العامة بإيجاز، مع إبقاء تركيزك الأساسي على الفلك."
           },
-          contents,
-          generationConfig: { temperature: 0.6, maxOutputTokens: 700 }
-        }),
-        signal: AbortSignal.timeout(30_000)
-      }
-    );
+          ...conversation
+        ],
+        temperature: 0.35,
+        max_tokens: 650,
+        stream: false
+      }),
+      signal: AbortSignal.timeout(45_000)
+    });
+
     const data = await upstream.json().catch(() => ({}));
     if (!upstream.ok) {
-      console.error("Gemini API request failed with status", upstream.status);
-      if (upstream.status === 429) {
-        return res.status(429).json({ error: "وصل المساعد إلى حد الاستخدام المؤقت. حاول بعد قليل." });
+      console.error("Hugging Face inference failed:", upstream.status);
+      if (upstream.status === 401 || upstream.status === 403) {
+        return res.status(502).json({ error: "رمز الوصول غير صالح أو لا يملك صلاحية الاستدلال. راجع إعداد HF_TOKEN." });
       }
-      if (upstream.status === 400 || upstream.status === 403) {
-        return res.status(502).json({ error: "تعذر استخدام مفتاح Gemini. راجع إعداد المفتاح وصلاحياته في Render." });
+      if (upstream.status === 402 || upstream.status === 429) {
+        return res.status(429).json({ error: "رصيد الاستخدام المجاني أو حد الطلبات غير كافٍ حاليًا. تحقق من رصيد Hugging Face وحاول لاحقًا." });
       }
-      return res.status(502).json({ error: "خدمة الذكاء الاصطناعي لا تستجيب الآن. حاول لاحقًا." });
+      return res.status(502).json({ error: "نموذج الذكاء الاصطناعي غير متاح الآن. حاول بعد قليل." });
     }
-    const reply = data.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text || "")
-      .join("")
-      .trim();
+
+    const reply = data.choices?.[0]?.message?.content?.trim();
     if (!reply) {
-      return res.status(502).json({ error: "لم يتمكن نجم من إنشاء إجابة. أعد صياغة السؤال." });
+      return res.status(502).json({ error: "لم يُرجع النموذج إجابة قابلة للعرض. أعد صياغة السؤال." });
     }
     return res.json({ reply });
   } catch (error) {
-    console.error("Gemini API connection error:", error.name);
-    return res.status(502).json({ error: "تعذر الاتصال بخدمة الذكاء الاصطناعي. حاول مجددًا." });
+    console.error("Inference connection error:", error.name);
+    return res.status(502).json({ error: "تعذر الاتصال بنموذج الذكاء الاصطناعي. حاول مجددًا." });
   }
 });
 
